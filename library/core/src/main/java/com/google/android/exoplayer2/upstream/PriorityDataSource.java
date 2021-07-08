@@ -16,19 +16,23 @@
 package com.google.android.exoplayer2.upstream;
 
 import android.net.Uri;
+import androidx.annotation.Nullable;
 import com.google.android.exoplayer2.util.Assertions;
 import com.google.android.exoplayer2.util.PriorityTaskManager;
 import java.io.IOException;
+import java.util.List;
+import java.util.Map;
 
 /**
- * A {@link DataSource} that can be used as part of a task registered with a
- * {@link PriorityTaskManager}.
- * <p>
- * Calls to {@link #open(DataSpec)} and {@link #read(byte[], int, int)} are allowed to proceed only
- * if there are no higher priority tasks registered to the {@link PriorityTaskManager}. If there
- * exists a higher priority task then {@link PriorityTaskManager.PriorityTooLowException} is thrown.
- * <p>
- * Instances of this class are intended to be used as parts of (possibly larger) tasks that are
+ * A {@link DataSource} that can be used as part of a task registered with a {@link
+ * PriorityTaskManager}.
+ *
+ * <p>Calls to {@link #open(DataSpec)} and {@link #read(byte[], int, int)} are allowed to proceed
+ * only if there are no higher priority tasks registered to the {@link PriorityTaskManager}. If
+ * there exists a higher priority task then {@link PriorityTaskManager.PriorityTooLowException} is
+ * thrown.
+ *
+ * <p>Instances of this class are intended to be used as parts of (possibly larger) tasks that are
  * registered with the {@link PriorityTaskManager}, and hence do <em>not</em> register as tasks
  * themselves.
  */
@@ -51,6 +55,12 @@ public final class PriorityDataSource implements DataSource {
   }
 
   @Override
+  public void addTransferListener(TransferListener transferListener) {
+    Assertions.checkNotNull(transferListener);
+    upstream.addTransferListener(transferListener);
+  }
+
+  @Override
   public long open(DataSpec dataSpec) throws IOException {
     priorityTaskManager.proceedOrThrow(priority);
     return upstream.open(dataSpec);
@@ -63,8 +73,14 @@ public final class PriorityDataSource implements DataSource {
   }
 
   @Override
+  @Nullable
   public Uri getUri() {
     return upstream.getUri();
+  }
+
+  @Override
+  public Map<String, List<String>> getResponseHeaders() {
+    return upstream.getResponseHeaders();
   }
 
   @Override
