@@ -15,19 +15,25 @@
  */
 package com.google.android.exoplayer2.trackselection;
 
+import androidx.annotation.Nullable;
 import java.util.Arrays;
+import org.checkerframework.checker.nullness.compatqual.NullableType;
 
 /**
- * The result of a {@link TrackSelector} operation.
+ * An array of {@link TrackSelection}s.
+ *
+ * @deprecated com.google.android.exoplayer2 is deprecated. Please migrate to androidx.media3 (which
+ *     contains the same ExoPlayer code). See <a
+ *     href="https://developer.android.com/guide/topics/media/media3/getting-started/migration-guide">the
+ *     migration guide</a> for more details, including a script to help with the migration.
  */
+@Deprecated
 public final class TrackSelectionArray {
 
-  /**
-   * The number of selections in the result. Greater than or equal to zero.
-   */
+  /** The length of this array. */
   public final int length;
 
-  private final TrackSelection[] trackSelections;
+  private final @NullableType TrackSelection[] trackSelections;
 
   // Lazily initialized hashcode.
   private int hashCode;
@@ -35,7 +41,7 @@ public final class TrackSelectionArray {
   /**
    * @param trackSelections The selections. Must not be null, but may contain null elements.
    */
-  public TrackSelectionArray(TrackSelection... trackSelections) {
+  public TrackSelectionArray(@NullableType TrackSelection... trackSelections) {
     this.trackSelections = trackSelections;
     this.length = trackSelections.length;
   }
@@ -46,14 +52,13 @@ public final class TrackSelectionArray {
    * @param index The index of the selection.
    * @return The selection.
    */
+  @Nullable
   public TrackSelection get(int index) {
     return trackSelections[index];
   }
 
-  /**
-   * Returns the selections in a newly allocated array.
-   */
-  public TrackSelection[] getAll() {
+  /** Returns the selections in a newly allocated array. */
+  public @NullableType TrackSelection[] getAll() {
     return trackSelections.clone();
   }
 
@@ -68,7 +73,7 @@ public final class TrackSelectionArray {
   }
 
   @Override
-  public boolean equals(Object obj) {
+  public boolean equals(@Nullable Object obj) {
     if (this == obj) {
       return true;
     }
@@ -78,5 +83,4 @@ public final class TrackSelectionArray {
     TrackSelectionArray other = (TrackSelectionArray) obj;
     return Arrays.equals(trackSelections, other.trackSelections);
   }
-
 }

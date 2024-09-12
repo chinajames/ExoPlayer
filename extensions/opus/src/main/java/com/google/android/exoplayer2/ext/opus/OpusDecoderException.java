@@ -15,12 +15,18 @@
  */
 package com.google.android.exoplayer2.ext.opus;
 
-import com.google.android.exoplayer2.audio.AudioDecoderException;
+import com.google.android.exoplayer2.decoder.DecoderException;
 
 /**
  * Thrown when an Opus decoder error occurs.
+ *
+ * @deprecated com.google.android.exoplayer2 is deprecated. Please migrate to androidx.media3 (which
+ *     contains the same ExoPlayer code). See <a
+ *     href="https://developer.android.com/guide/topics/media/media3/getting-started/migration-guide">the
+ *     migration guide</a> for more details, including a script to help with the migration.
  */
-public final class OpusDecoderException extends AudioDecoderException {
+@Deprecated
+public final class OpusDecoderException extends DecoderException {
 
   /* package */ OpusDecoderException(String message) {
     super(message);
@@ -29,5 +35,4 @@ public final class OpusDecoderException extends AudioDecoderException {
   /* package */ OpusDecoderException(String message, Throwable cause) {
     super(message, cause);
   }
-
 }

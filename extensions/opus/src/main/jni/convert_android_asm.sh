@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 
-set -e
+set -eu
 ASM_CONVERTER="./libopus/celt/arm/arm2gnu.pl"
 
 if [[ ! -x "${ASM_CONVERTER}" ]]; then
@@ -34,7 +34,7 @@ while read file; do
     perl -pi -e "s/-gnu\.S/_gnu\.s/g" "${gnu_file}"
     rm -f "${file}"
   fi
-done < <(find . -iname '*.s')
+done < <(find -L . -iname '*.s')
 
 # Generate armopts.s from armopts.s.in
 sed \

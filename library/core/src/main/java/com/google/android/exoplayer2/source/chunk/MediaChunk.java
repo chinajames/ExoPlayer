@@ -15,6 +15,7 @@
  */
 package com.google.android.exoplayer2.source.chunk;
 
+import androidx.annotation.Nullable;
 import com.google.android.exoplayer2.C;
 import com.google.android.exoplayer2.Format;
 import com.google.android.exoplayer2.upstream.DataSource;
@@ -23,13 +24,17 @@ import com.google.android.exoplayer2.util.Assertions;
 
 /**
  * An abstract base class for {@link Chunk}s that contain media samples.
+ *
+ * @deprecated com.google.android.exoplayer2 is deprecated. Please migrate to androidx.media3 (which
+ *     contains the same ExoPlayer code). See <a
+ *     href="https://developer.android.com/guide/topics/media/media3/getting-started/migration-guide">the
+ *     migration guide</a> for more details, including a script to help with the migration.
  */
+@Deprecated
 public abstract class MediaChunk extends Chunk {
 
-  /**
-   * The chunk index.
-   */
-  public final int chunkIndex;
+  /** The chunk index, or {@link C#INDEX_UNSET} if it is not known. */
+  public final long chunkIndex;
 
   /**
    * @param dataSource The source from which the data should be loaded.
@@ -39,27 +44,35 @@ public abstract class MediaChunk extends Chunk {
    * @param trackSelectionData See {@link #trackSelectionData}.
    * @param startTimeUs The start time of the media contained by the chunk, in microseconds.
    * @param endTimeUs The end time of the media contained by the chunk, in microseconds.
-   * @param chunkIndex The index of the chunk.
+   * @param chunkIndex The index of the chunk, or {@link C#INDEX_UNSET} if it is not known.
    */
-  public MediaChunk(DataSource dataSource, DataSpec dataSpec, Format trackFormat,
-      int trackSelectionReason, Object trackSelectionData, long startTimeUs, long endTimeUs,
-      int chunkIndex) {
-    super(dataSource, dataSpec, C.DATA_TYPE_MEDIA, trackFormat, trackSelectionReason,
-        trackSelectionData, startTimeUs, endTimeUs);
+  public MediaChunk(
+      DataSource dataSource,
+      DataSpec dataSpec,
+      Format trackFormat,
+      @C.SelectionReason int trackSelectionReason,
+      @Nullable Object trackSelectionData,
+      long startTimeUs,
+      long endTimeUs,
+      long chunkIndex) {
+    super(
+        dataSource,
+        dataSpec,
+        C.DATA_TYPE_MEDIA,
+        trackFormat,
+        trackSelectionReason,
+        trackSelectionData,
+        startTimeUs,
+        endTimeUs);
     Assertions.checkNotNull(trackFormat);
     this.chunkIndex = chunkIndex;
   }
 
-  /**
-   * Returns the next chunk index.
-   */
-  public int getNextChunkIndex() {
-    return chunkIndex + 1;
+  /** Returns the next chunk index or {@link C#INDEX_UNSET} if it is not known. */
+  public long getNextChunkIndex() {
+    return chunkIndex != C.INDEX_UNSET ? chunkIndex + 1 : C.INDEX_UNSET;
   }
 
-  /**
-   * Returns whether the chunk has been fully loaded.
-   */
+  /** Returns whether the chunk has been fully loaded. */
   public abstract boolean isLoadCompleted();
-
 }

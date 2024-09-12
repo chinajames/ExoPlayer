@@ -17,37 +17,33 @@ package com.google.android.exoplayer2.upstream;
 
 /**
  * An allocation within a byte array.
- * <p>
- * The allocation's length is obtained by calling {@link Allocator#getIndividualAllocationLength()}
- * on the {@link Allocator} from which it was obtained.
+ *
+ * <p>The allocation's length is obtained by calling {@link
+ * Allocator#getIndividualAllocationLength()} on the {@link Allocator} from which it was obtained.
+ *
+ * @deprecated com.google.android.exoplayer2 is deprecated. Please migrate to androidx.media3 (which
+ *     contains the same ExoPlayer code). See <a
+ *     href="https://developer.android.com/guide/topics/media/media3/getting-started/migration-guide">the
+ *     migration guide</a> for more details, including a script to help with the migration.
  */
+@Deprecated
 public final class Allocation {
 
   /**
    * The array containing the allocated space. The allocated space might not be at the start of the
-   * array, and so {@link #translateOffset(int)} method must be used when indexing into it.
+   * array, and so {@link #offset} must be used when indexing into it.
    */
   public final byte[] data;
 
-  private final int offset;
+  /** The offset of the allocated space in {@link #data}. */
+  public final int offset;
 
   /**
    * @param data The array containing the allocated space.
-   * @param offset The offset of the allocated space within the array.
+   * @param offset The offset of the allocated space in {@code data}.
    */
   public Allocation(byte[] data, int offset) {
     this.data = data;
     this.offset = offset;
   }
-
-  /**
-   * Translates a zero-based offset into the allocation to the corresponding {@link #data} offset.
-   *
-   * @param offset The zero-based offset to translate.
-   * @return The corresponding offset in {@link #data}.
-   */
-  public int translateOffset(int offset) {
-    return this.offset + offset;
-  }
-
 }

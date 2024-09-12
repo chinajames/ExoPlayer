@@ -15,33 +15,35 @@
  */
 package com.google.android.exoplayer2;
 
+import androidx.annotation.Nullable;
+
 /**
  * The configuration of a {@link Renderer}.
+ *
+ * @deprecated com.google.android.exoplayer2 is deprecated. Please migrate to androidx.media3 (which
+ *     contains the same ExoPlayer code). See <a
+ *     href="https://developer.android.com/guide/topics/media/media3/getting-started/migration-guide">the
+ *     migration guide</a> for more details, including a script to help with the migration.
  */
+@Deprecated
 public final class RendererConfiguration {
 
-  /**
-   * The default configuration.
-   */
+  /** The default configuration. */
   public static final RendererConfiguration DEFAULT =
-      new RendererConfiguration(C.AUDIO_SESSION_ID_UNSET);
+      new RendererConfiguration(/* tunneling= */ false);
+
+  /** Whether to enable tunneling. */
+  public final boolean tunneling;
 
   /**
-   * The audio session id to use for tunneling, or {@link C#AUDIO_SESSION_ID_UNSET} if tunneling
-   * should not be enabled.
+   * @param tunneling Whether to enable tunneling.
    */
-  public final int tunnelingAudioSessionId;
-
-  /**
-   * @param tunnelingAudioSessionId The audio session id to use for tunneling, or
-   *     {@link C#AUDIO_SESSION_ID_UNSET} if tunneling should not be enabled.
-   */
-  public RendererConfiguration(int tunnelingAudioSessionId) {
-    this.tunnelingAudioSessionId = tunnelingAudioSessionId;
+  public RendererConfiguration(boolean tunneling) {
+    this.tunneling = tunneling;
   }
 
   @Override
-  public boolean equals(Object obj) {
+  public boolean equals(@Nullable Object obj) {
     if (this == obj) {
       return true;
     }
@@ -49,12 +51,11 @@ public final class RendererConfiguration {
       return false;
     }
     RendererConfiguration other = (RendererConfiguration) obj;
-    return tunnelingAudioSessionId == other.tunnelingAudioSessionId;
+    return tunneling == other.tunneling;
   }
 
   @Override
   public int hashCode() {
-    return tunnelingAudioSessionId;
+    return tunneling ? 0 : 1;
   }
-
 }

@@ -15,48 +15,64 @@
  */
 package com.google.android.exoplayer2.trackselection;
 
+import static java.lang.annotation.ElementType.TYPE_USE;
+
+import androidx.annotation.IntDef;
 import com.google.android.exoplayer2.C;
 import com.google.android.exoplayer2.Format;
 import com.google.android.exoplayer2.source.TrackGroup;
-import com.google.android.exoplayer2.source.chunk.MediaChunk;
-import java.util.List;
+import java.lang.annotation.Documented;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
 
 /**
- * A track selection consisting of a static subset of selected tracks belonging to a
- * {@link TrackGroup}, and a possibly varying individual selected track from the subset.
- * <p>
- * Tracks belonging to the subset are exposed in decreasing bandwidth order. The individual selected
- * track may change as a result of calling {@link #updateSelectedTrack(long)}.
+ * A track selection consisting of a static subset of selected tracks belonging to a {@link
+ * TrackGroup}.
+ *
+ * <p>Tracks belonging to the subset are exposed in decreasing bandwidth order.
+ *
+ * @deprecated com.google.android.exoplayer2 is deprecated. Please migrate to androidx.media3 (which
+ *     contains the same ExoPlayer code). See <a
+ *     href="https://developer.android.com/guide/topics/media/media3/getting-started/migration-guide">the
+ *     migration guide</a> for more details, including a script to help with the migration.
  */
+@Deprecated
 public interface TrackSelection {
 
   /**
-   * Factory for {@link TrackSelection} instances.
+   * Represents a type track selection. Either {@link #TYPE_UNSET} or an app-defined value (see
+   * {@link #TYPE_CUSTOM_BASE}).
    */
-  interface Factory {
-
-    /**
-     * Creates a new selection.
-     *
-     * @param group The {@link TrackGroup}. Must not be null.
-     * @param tracks The indices of the selected tracks within the {@link TrackGroup}. Must not be
-     *     null or empty. May be in any order.
-     * @return The created selection.
-     */
-    TrackSelection createTrackSelection(TrackGroup group, int... tracks);
-
-  }
+  @Documented
+  @Retention(RetentionPolicy.SOURCE)
+  @Target(TYPE_USE)
+  @IntDef(
+      open = true,
+      value = {TYPE_UNSET})
+  @interface Type {}
+  /** An unspecified track selection type. */
+  int TYPE_UNSET = 0;
+  /** The first value that can be used for application specific track selection types. */
+  int TYPE_CUSTOM_BASE = 10000;
 
   /**
-   * Returns the {@link TrackGroup} to which the selected tracks belong.
+   * Returns an integer specifying the type of the selection, or {@link #TYPE_UNSET} if not
+   * specified.
+   *
+   * <p>Track selection types are specific to individual applications, but should be defined
+   * starting from {@link #TYPE_CUSTOM_BASE} to ensure they don't conflict with any types that may
+   * be added to the library in the future.
    */
+  @Type
+  int getType();
+
+  /** Returns the {@link TrackGroup} to which the selected tracks belong. */
   TrackGroup getTrackGroup();
 
   // Static subset of selected tracks.
 
-  /**
-   * Returns the number of tracks in the selection.
-   */
+  /** Returns the number of tracks in the selection. */
   int length();
 
   /**
@@ -76,7 +92,9 @@ public interface TrackSelection {
   int getIndexInTrackGroup(int index);
 
   /**
-   * Returns the index in the selection of the track with the specified format.
+   * Returns the index in the selection of the track with the specified format. The format is
+   * located by identity so, for example, {@code selection.indexOf(selection.getFormat(index)) ==
+   * index} even if multiple selected tracks have formats that contain the same values.
    *
    * @param format The format.
    * @return The index in the selection, or {@link C#INDEX_UNSET} if the track with the specified
@@ -92,72 +110,4 @@ public interface TrackSelection {
    *     index is not part of the selection.
    */
   int indexOf(int indexInTrackGroup);
-
-  // Individual selected track.
-
-  /**
-   * Returns the {@link Format} of the individual selected track.
-   */
-  Format getSelectedFormat();
-
-  /**
-   * Returns the index in the track group of the individual selected track.
-   */
-  int getSelectedIndexInTrackGroup();
-
-  /**
-   * Returns the index of the selected track.
-   */
-  int getSelectedIndex();
-
-  /**
-   * Returns the reason for the current track selection.
-   */
-  int getSelectionReason();
-
-  /**
-   * Returns optional data associated with the current track selection.
-   */
-  Object getSelectionData();
-
-  // Adaptation.
-
-  /**
-   * Updates the selected track.
-   *
-   * @param bufferedDurationUs The duration of media currently buffered in microseconds.
-   */
-  void updateSelectedTrack(long bufferedDurationUs);
-
-  /**
-   * May be called periodically by sources that load media in discrete {@link MediaChunk}s and
-   * support discarding of buffered chunks in order to re-buffer using a different selected track.
-   * Returns the number of chunks that should be retained in the queue.
-   * <p>
-   * To avoid excessive re-buffering, implementations should normally return the size of the queue.
-   * An example of a case where a smaller value may be returned is if network conditions have
-   * improved dramatically, allowing chunks to be discarded and re-buffered in a track of
-   * significantly higher quality. Discarding chunks may allow faster switching to a higher quality
-   * track in this case.
-   *
-   * @param playbackPositionUs The current playback position in microseconds.
-   * @param queue The queue of buffered {@link MediaChunk}s. Must not be modified.
-   * @return The number of chunks to retain in the queue.
-   */
-  int evaluateQueueSize(long playbackPositionUs, List<? extends MediaChunk> queue);
-
-  /**
-   * Attempts to blacklist the track at the specified index in the selection, making it ineligible
-   * for selection by calls to {@link #updateSelectedTrack(long)} for the specified period of time.
-   * Blacklisting will fail if all other tracks are currently blacklisted. If blacklisting the
-   * currently selected track, note that it will remain selected until the next call to
-   * {@link #updateSelectedTrack(long)}.
-   *
-   * @param index The index of the track in the selection.
-   * @param blacklistDurationMs The duration of time for which the track should be blacklisted, in
-   *     milliseconds.
-   * @return Whether blacklisting was successful.
-   */
-  boolean blacklist(int index, long blacklistDurationMs);
-
 }

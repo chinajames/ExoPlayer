@@ -15,859 +15,1320 @@
  */
 package com.google.android.exoplayer2;
 
-import android.annotation.TargetApi;
-import android.graphics.SurfaceTexture;
-import android.media.MediaCodec;
-import android.media.PlaybackParams;
-import android.os.Handler;
+import static androidx.annotation.VisibleForTesting.PROTECTED;
+
+import android.content.Context;
+import android.media.AudioDeviceInfo;
 import android.os.Looper;
-import android.support.annotation.Nullable;
-import android.util.Log;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.TextureView;
-import com.google.android.exoplayer2.audio.AudioRendererEventListener;
+import androidx.annotation.IntRange;
+import androidx.annotation.Nullable;
+import androidx.annotation.RequiresApi;
+import androidx.annotation.VisibleForTesting;
+import com.google.android.exoplayer2.analytics.AnalyticsCollector;
+import com.google.android.exoplayer2.analytics.AnalyticsListener;
+import com.google.android.exoplayer2.audio.AudioAttributes;
+import com.google.android.exoplayer2.audio.AuxEffectInfo;
 import com.google.android.exoplayer2.decoder.DecoderCounters;
-import com.google.android.exoplayer2.metadata.Metadata;
-import com.google.android.exoplayer2.metadata.MetadataRenderer;
+import com.google.android.exoplayer2.extractor.ExtractorsFactory;
+import com.google.android.exoplayer2.source.DefaultMediaSourceFactory;
 import com.google.android.exoplayer2.source.MediaSource;
+import com.google.android.exoplayer2.source.ShuffleOrder;
 import com.google.android.exoplayer2.source.TrackGroupArray;
-import com.google.android.exoplayer2.text.Cue;
-import com.google.android.exoplayer2.text.TextRenderer;
+import com.google.android.exoplayer2.text.CueGroup;
 import com.google.android.exoplayer2.trackselection.TrackSelectionArray;
+import com.google.android.exoplayer2.trackselection.TrackSelectionParameters;
 import com.google.android.exoplayer2.trackselection.TrackSelector;
-import com.google.android.exoplayer2.video.VideoRendererEventListener;
+import com.google.android.exoplayer2.upstream.BandwidthMeter;
+import com.google.android.exoplayer2.util.Clock;
+import com.google.android.exoplayer2.util.ConditionVariable;
+import com.google.android.exoplayer2.util.Effect;
+import com.google.android.exoplayer2.util.PriorityTaskManager;
+import com.google.android.exoplayer2.util.Size;
+import com.google.android.exoplayer2.video.VideoFrameMetadataListener;
+import com.google.android.exoplayer2.video.VideoSize;
+import com.google.android.exoplayer2.video.spherical.CameraMotionListener;
+import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import java.util.List;
 
 /**
- * An {@link ExoPlayer} implementation that uses default {@link Renderer} components. Instances can
- * be obtained from {@link ExoPlayerFactory}.
+ * @deprecated Use {@link ExoPlayer} instead.
  */
-@TargetApi(16)
-public class SimpleExoPlayer implements ExoPlayer {
+@Deprecated
+public class SimpleExoPlayer extends BasePlayer
+    implements ExoPlayer,
+        ExoPlayer.AudioComponent,
+        ExoPlayer.VideoComponent,
+        ExoPlayer.TextComponent,
+        ExoPlayer.DeviceComponent {
 
   /**
-   * A listener for video rendering information from a {@link SimpleExoPlayer}.
-   */
-  public interface VideoListener {
-
-    /**
-     * Called each time there's a change in the size of the video being rendered.
-     *
-     * @param width The video width in pixels.
-     * @param height The video height in pixels.
-     * @param unappliedRotationDegrees For videos that require a rotation, this is the clockwise
-     *     rotation in degrees that the application should apply for the video for it to be rendered
-     *     in the correct orientation. This value will always be zero on API levels 21 and above,
-     *     since the renderer will apply all necessary rotations internally. On earlier API levels
-     *     this is not possible. Applications that use {@link android.view.TextureView} can apply
-     *     the rotation by calling {@link android.view.TextureView#setTransform}. Applications that
-     *     do not expect to encounter rotated videos can safely ignore this parameter.
-     * @param pixelWidthHeightRatio The width to height ratio of each pixel. For the normal case
-     *     of square pixels this will be equal to 1.0. Different values are indicative of anamorphic
-     *     content.
-     */
-    void onVideoSizeChanged(int width, int height, int unappliedRotationDegrees,
-        float pixelWidthHeightRatio);
-
-    /**
-     * Called when a frame is rendered for the first time since setting the surface, and when a
-     * frame is rendered for the first time since a video track was selected.
-     */
-    void onRenderedFirstFrame();
-
-  }
-
-  private static final String TAG = "SimpleExoPlayer";
-
-  protected final Renderer[] renderers;
-
-  private final ExoPlayer player;
-  private final ComponentListener componentListener;
-  private final int videoRendererCount;
-  private final int audioRendererCount;
-
-  private Format videoFormat;
-  private Format audioFormat;
-
-  private Surface surface;
-  private boolean ownsSurface;
-  @C.VideoScalingMode
-  private int videoScalingMode;
-  private SurfaceHolder surfaceHolder;
-  private TextureView textureView;
-  private TextRenderer.Output textOutput;
-  private MetadataRenderer.Output metadataOutput;
-  private VideoListener videoListener;
-  private AudioRendererEventListener audioDebugListener;
-  private VideoRendererEventListener videoDebugListener;
-  private DecoderCounters videoDecoderCounters;
-  private DecoderCounters audioDecoderCounters;
-  private int audioSessionId;
-  @C.StreamType
-  private int audioStreamType;
-  private float audioVolume;
-
-  protected SimpleExoPlayer(RenderersFactory renderersFactory, TrackSelector trackSelector,
-      LoadControl loadControl) {
-    componentListener = new ComponentListener();
-    Looper eventLooper = Looper.myLooper() != null ? Looper.myLooper() : Looper.getMainLooper();
-    Handler eventHandler = new Handler(eventLooper);
-    renderers = renderersFactory.createRenderers(eventHandler, componentListener, componentListener,
-        componentListener, componentListener);
-
-    // Obtain counts of video and audio renderers.
-    int videoRendererCount = 0;
-    int audioRendererCount = 0;
-    for (Renderer renderer : renderers) {
-      switch (renderer.getTrackType()) {
-        case C.TRACK_TYPE_VIDEO:
-          videoRendererCount++;
-          break;
-        case C.TRACK_TYPE_AUDIO:
-          audioRendererCount++;
-          break;
-      }
-    }
-    this.videoRendererCount = videoRendererCount;
-    this.audioRendererCount = audioRendererCount;
-
-    // Set initial values.
-    audioVolume = 1;
-    audioSessionId = C.AUDIO_SESSION_ID_UNSET;
-    audioStreamType = C.STREAM_TYPE_DEFAULT;
-    videoScalingMode = C.VIDEO_SCALING_MODE_DEFAULT;
-
-    // Build the player and associated objects.
-    player = new ExoPlayerImpl(renderers, trackSelector, loadControl);
-  }
-
-  /**
-   * Sets the video scaling mode.
-   * <p>
-   * Note that the scaling mode only applies if a {@link MediaCodec}-based video {@link Renderer} is
-   * enabled and if the output surface is owned by a {@link android.view.SurfaceView}.
-   *
-   * @param videoScalingMode The video scaling mode.
-   */
-  public void setVideoScalingMode(@C.VideoScalingMode int videoScalingMode) {
-    this.videoScalingMode = videoScalingMode;
-    ExoPlayerMessage[] messages = new ExoPlayerMessage[videoRendererCount];
-    int count = 0;
-    for (Renderer renderer : renderers) {
-      if (renderer.getTrackType() == C.TRACK_TYPE_VIDEO) {
-        messages[count++] = new ExoPlayerMessage(renderer, C.MSG_SET_SCALING_MODE,
-            videoScalingMode);
-      }
-    }
-    player.sendMessages(messages);
-  }
-
-  /**
-   * Returns the video scaling mode.
-   */
-  public @C.VideoScalingMode int getVideoScalingMode() {
-    return videoScalingMode;
-  }
-
-  /**
-   * Clears any {@link Surface}, {@link SurfaceHolder}, {@link SurfaceView} or {@link TextureView}
-   * currently set on the player.
-   */
-  public void clearVideoSurface() {
-    setVideoSurface(null);
-  }
-
-  /**
-   * Sets the {@link Surface} onto which video will be rendered. The caller is responsible for
-   * tracking the lifecycle of the surface, and must clear the surface by calling
-   * {@code setVideoSurface(null)} if the surface is destroyed.
-   * <p>
-   * If the surface is held by a {@link SurfaceView}, {@link TextureView} or {@link SurfaceHolder}
-   * then it's recommended to use {@link #setVideoSurfaceView(SurfaceView)},
-   * {@link #setVideoTextureView(TextureView)} or {@link #setVideoSurfaceHolder(SurfaceHolder)}
-   * rather than this method, since passing the holder allows the player to track the lifecycle of
-   * the surface automatically.
-   *
-   * @param surface The {@link Surface}.
-   */
-  public void setVideoSurface(Surface surface) {
-    removeSurfaceCallbacks();
-    setVideoSurfaceInternal(surface, false);
-  }
-
-  /**
-   * Clears the {@link Surface} onto which video is being rendered if it matches the one passed.
-   * Else does nothing.
-   *
-   * @param surface The surface to clear.
-   */
-  public void clearVideoSurface(Surface surface) {
-    if (surface != null && surface == this.surface) {
-      setVideoSurface(null);
-    }
-  }
-
-  /**
-   * Sets the {@link SurfaceHolder} that holds the {@link Surface} onto which video will be
-   * rendered. The player will track the lifecycle of the surface automatically.
-   *
-   * @param surfaceHolder The surface holder.
-   */
-  public void setVideoSurfaceHolder(SurfaceHolder surfaceHolder) {
-    removeSurfaceCallbacks();
-    this.surfaceHolder = surfaceHolder;
-    if (surfaceHolder == null) {
-      setVideoSurfaceInternal(null, false);
-    } else {
-      setVideoSurfaceInternal(surfaceHolder.getSurface(), false);
-      surfaceHolder.addCallback(componentListener);
-    }
-  }
-
-  /**
-   * Clears the {@link SurfaceHolder} that holds the {@link Surface} onto which video is being
-   * rendered if it matches the one passed. Else does nothing.
-   *
-   * @param surfaceHolder The surface holder to clear.
-   */
-  public void clearVideoSurfaceHolder(SurfaceHolder surfaceHolder) {
-    if (surfaceHolder != null && surfaceHolder == this.surfaceHolder) {
-      setVideoSurfaceHolder(null);
-    }
-  }
-
-  /**
-   * Sets the {@link SurfaceView} onto which video will be rendered. The player will track the
-   * lifecycle of the surface automatically.
-   *
-   * @param surfaceView The surface view.
-   */
-  public void setVideoSurfaceView(SurfaceView surfaceView) {
-    setVideoSurfaceHolder(surfaceView == null ? null : surfaceView.getHolder());
-  }
-
-  /**
-   * Clears the {@link SurfaceView} onto which video is being rendered if it matches the one passed.
-   * Else does nothing.
-   *
-   * @param surfaceView The texture view to clear.
-   */
-  public void clearVideoSurfaceView(SurfaceView surfaceView) {
-    clearVideoSurfaceHolder(surfaceView == null ? null : surfaceView.getHolder());
-  }
-
-  /**
-   * Sets the {@link TextureView} onto which video will be rendered. The player will track the
-   * lifecycle of the surface automatically.
-   *
-   * @param textureView The texture view.
-   */
-  public void setVideoTextureView(TextureView textureView) {
-    removeSurfaceCallbacks();
-    this.textureView = textureView;
-    if (textureView == null) {
-      setVideoSurfaceInternal(null, true);
-    } else {
-      if (textureView.getSurfaceTextureListener() != null) {
-        Log.w(TAG, "Replacing existing SurfaceTextureListener.");
-      }
-      SurfaceTexture surfaceTexture = textureView.getSurfaceTexture();
-      setVideoSurfaceInternal(surfaceTexture == null ? null : new Surface(surfaceTexture), true);
-      textureView.setSurfaceTextureListener(componentListener);
-    }
-  }
-
-  /**
-   * Clears the {@link TextureView} onto which video is being rendered if it matches the one passed.
-   * Else does nothing.
-   *
-   * @param textureView The texture view to clear.
-   */
-  public void clearVideoTextureView(TextureView textureView) {
-    if (textureView != null && textureView == this.textureView) {
-      setVideoTextureView(null);
-    }
-  }
-
-  /**
-   * Sets the stream type for audio playback (see {@link C.StreamType} and
-   * {@link android.media.AudioTrack#AudioTrack(int, int, int, int, int, int)}). If the stream type
-   * is not set, audio renderers use {@link C#STREAM_TYPE_DEFAULT}.
-   * <p>
-   * Note that when the stream type changes, the AudioTrack must be reinitialized, which can
-   * introduce a brief gap in audio output. Note also that tracks in the same audio session must
-   * share the same routing, so a new audio session id will be generated.
-   *
-   * @param audioStreamType The stream type for audio playback.
-   */
-  public void setAudioStreamType(@C.StreamType int audioStreamType) {
-    this.audioStreamType = audioStreamType;
-    ExoPlayerMessage[] messages = new ExoPlayerMessage[audioRendererCount];
-    int count = 0;
-    for (Renderer renderer : renderers) {
-      if (renderer.getTrackType() == C.TRACK_TYPE_AUDIO) {
-        messages[count++] = new ExoPlayerMessage(renderer, C.MSG_SET_STREAM_TYPE, audioStreamType);
-      }
-    }
-    player.sendMessages(messages);
-  }
-
-  /**
-   * Returns the stream type for audio playback.
-   */
-  public @C.StreamType int getAudioStreamType() {
-    return audioStreamType;
-  }
-
-  /**
-   * Sets the audio volume, with 0 being silence and 1 being unity gain.
-   *
-   * @param audioVolume The audio volume.
-   */
-  public void setVolume(float audioVolume) {
-    this.audioVolume = audioVolume;
-    ExoPlayerMessage[] messages = new ExoPlayerMessage[audioRendererCount];
-    int count = 0;
-    for (Renderer renderer : renderers) {
-      if (renderer.getTrackType() == C.TRACK_TYPE_AUDIO) {
-        messages[count++] = new ExoPlayerMessage(renderer, C.MSG_SET_VOLUME, audioVolume);
-      }
-    }
-    player.sendMessages(messages);
-  }
-
-  /**
-   * Returns the audio volume, with 0 being silence and 1 being unity gain.
-   */
-  public float getVolume() {
-    return audioVolume;
-  }
-
-  /**
-   * Sets the {@link PlaybackParams} governing audio playback.
-   *
-   * @deprecated Use {@link #setPlaybackParameters(PlaybackParameters)}.
-   * @param params The {@link PlaybackParams}, or null to clear any previously set parameters.
+   * @deprecated Use {@link ExoPlayer.Builder} instead.
    */
   @Deprecated
-  @TargetApi(23)
-  public void setPlaybackParams(@Nullable PlaybackParams params) {
-    PlaybackParameters playbackParameters;
-    if (params != null) {
-      params.allowDefaults();
-      playbackParameters = new PlaybackParameters(params.getSpeed(), params.getPitch());
-    } else {
-      playbackParameters = null;
+  @SuppressWarnings("deprecation")
+  public static final class Builder {
+
+    private final ExoPlayer.Builder wrappedBuilder;
+
+    /**
+     * @deprecated Use {@link ExoPlayer.Builder#Builder(Context)} instead.
+     */
+    @Deprecated
+    public Builder(Context context) {
+      wrappedBuilder = new ExoPlayer.Builder(context);
     }
-    setPlaybackParameters(playbackParameters);
+
+    /**
+     * @deprecated Use {@link ExoPlayer.Builder#Builder(Context, RenderersFactory)} instead.
+     */
+    @Deprecated
+    public Builder(Context context, RenderersFactory renderersFactory) {
+      wrappedBuilder = new ExoPlayer.Builder(context, renderersFactory);
+    }
+
+    /**
+     * @deprecated Use {@link ExoPlayer.Builder#Builder(Context, MediaSource.Factory)} and {@link
+     *     DefaultMediaSourceFactory#DefaultMediaSourceFactory(Context, ExtractorsFactory)} instead.
+     */
+    @Deprecated
+    public Builder(Context context, ExtractorsFactory extractorsFactory) {
+      wrappedBuilder =
+          new ExoPlayer.Builder(context, new DefaultMediaSourceFactory(context, extractorsFactory));
+    }
+
+    /**
+     * @deprecated Use {@link ExoPlayer.Builder#Builder(Context, RenderersFactory,
+     *     MediaSource.Factory)} and {@link
+     *     DefaultMediaSourceFactory#DefaultMediaSourceFactory(Context, ExtractorsFactory)} instead.
+     */
+    @Deprecated
+    public Builder(
+        Context context, RenderersFactory renderersFactory, ExtractorsFactory extractorsFactory) {
+      wrappedBuilder =
+          new ExoPlayer.Builder(
+              context, renderersFactory, new DefaultMediaSourceFactory(context, extractorsFactory));
+    }
+
+    /**
+     * @deprecated Use {@link ExoPlayer.Builder#Builder(Context, RenderersFactory,
+     *     MediaSource.Factory, TrackSelector, LoadControl, BandwidthMeter, AnalyticsCollector)}
+     *     instead.
+     */
+    @Deprecated
+    public Builder(
+        Context context,
+        RenderersFactory renderersFactory,
+        TrackSelector trackSelector,
+        MediaSource.Factory mediaSourceFactory,
+        LoadControl loadControl,
+        BandwidthMeter bandwidthMeter,
+        AnalyticsCollector analyticsCollector) {
+      wrappedBuilder =
+          new ExoPlayer.Builder(
+              context,
+              renderersFactory,
+              mediaSourceFactory,
+              trackSelector,
+              loadControl,
+              bandwidthMeter,
+              analyticsCollector);
+    }
+
+    /**
+     * @deprecated Use {@link ExoPlayer.Builder#experimentalSetForegroundModeTimeoutMs(long)}
+     *     instead.
+     */
+    @CanIgnoreReturnValue
+    @Deprecated
+    public Builder experimentalSetForegroundModeTimeoutMs(long timeoutMs) {
+      wrappedBuilder.experimentalSetForegroundModeTimeoutMs(timeoutMs);
+      return this;
+    }
+
+    /**
+     * @deprecated Use {@link ExoPlayer.Builder#setTrackSelector(TrackSelector)} instead.
+     */
+    @CanIgnoreReturnValue
+    @Deprecated
+    public Builder setTrackSelector(TrackSelector trackSelector) {
+      wrappedBuilder.setTrackSelector(trackSelector);
+      return this;
+    }
+
+    /**
+     * @deprecated Use {@link ExoPlayer.Builder#setMediaSourceFactory(MediaSource.Factory)} instead.
+     */
+    @CanIgnoreReturnValue
+    @Deprecated
+    public Builder setMediaSourceFactory(MediaSource.Factory mediaSourceFactory) {
+      wrappedBuilder.setMediaSourceFactory(mediaSourceFactory);
+      return this;
+    }
+
+    /**
+     * @deprecated Use {@link ExoPlayer.Builder#setLoadControl(LoadControl)} instead.
+     */
+    @CanIgnoreReturnValue
+    @Deprecated
+    public Builder setLoadControl(LoadControl loadControl) {
+      wrappedBuilder.setLoadControl(loadControl);
+      return this;
+    }
+
+    /**
+     * @deprecated Use {@link ExoPlayer.Builder#setBandwidthMeter(BandwidthMeter)} instead.
+     */
+    @CanIgnoreReturnValue
+    @Deprecated
+    public Builder setBandwidthMeter(BandwidthMeter bandwidthMeter) {
+      wrappedBuilder.setBandwidthMeter(bandwidthMeter);
+      return this;
+    }
+
+    /**
+     * @deprecated Use {@link ExoPlayer.Builder#setLooper(Looper)} instead.
+     */
+    @CanIgnoreReturnValue
+    @Deprecated
+    public Builder setLooper(Looper looper) {
+      wrappedBuilder.setLooper(looper);
+      return this;
+    }
+
+    /**
+     * @deprecated Use {@link ExoPlayer.Builder#setAnalyticsCollector(AnalyticsCollector)} instead.
+     */
+    @CanIgnoreReturnValue
+    @Deprecated
+    public Builder setAnalyticsCollector(AnalyticsCollector analyticsCollector) {
+      wrappedBuilder.setAnalyticsCollector(analyticsCollector);
+      return this;
+    }
+
+    /**
+     * @deprecated Use {@link ExoPlayer.Builder#setPriorityTaskManager(PriorityTaskManager)}
+     *     instead.
+     */
+    @CanIgnoreReturnValue
+    @Deprecated
+    public Builder setPriorityTaskManager(@Nullable PriorityTaskManager priorityTaskManager) {
+      wrappedBuilder.setPriorityTaskManager(priorityTaskManager);
+      return this;
+    }
+
+    /**
+     * @deprecated Use {@link ExoPlayer.Builder#setAudioAttributes(AudioAttributes, boolean)}
+     *     instead.
+     */
+    @CanIgnoreReturnValue
+    @Deprecated
+    public Builder setAudioAttributes(AudioAttributes audioAttributes, boolean handleAudioFocus) {
+      wrappedBuilder.setAudioAttributes(audioAttributes, handleAudioFocus);
+      return this;
+    }
+
+    /**
+     * @deprecated Use {@link ExoPlayer.Builder#setWakeMode(int)} instead.
+     */
+    @CanIgnoreReturnValue
+    @Deprecated
+    public Builder setWakeMode(@C.WakeMode int wakeMode) {
+      wrappedBuilder.setWakeMode(wakeMode);
+      return this;
+    }
+
+    /**
+     * @deprecated Use {@link ExoPlayer.Builder#setHandleAudioBecomingNoisy(boolean)} instead.
+     */
+    @CanIgnoreReturnValue
+    @Deprecated
+    public Builder setHandleAudioBecomingNoisy(boolean handleAudioBecomingNoisy) {
+      wrappedBuilder.setHandleAudioBecomingNoisy(handleAudioBecomingNoisy);
+      return this;
+    }
+
+    /**
+     * @deprecated Use {@link ExoPlayer.Builder#setSkipSilenceEnabled(boolean)} instead.
+     */
+    @CanIgnoreReturnValue
+    @Deprecated
+    public Builder setSkipSilenceEnabled(boolean skipSilenceEnabled) {
+      wrappedBuilder.setSkipSilenceEnabled(skipSilenceEnabled);
+      return this;
+    }
+
+    /**
+     * @deprecated Use {@link ExoPlayer.Builder#setVideoScalingMode(int)} instead.
+     */
+    @CanIgnoreReturnValue
+    @Deprecated
+    public Builder setVideoScalingMode(@C.VideoScalingMode int videoScalingMode) {
+      wrappedBuilder.setVideoScalingMode(videoScalingMode);
+      return this;
+    }
+
+    /**
+     * @deprecated Use {@link ExoPlayer.Builder#setVideoChangeFrameRateStrategy(int)} instead.
+     */
+    @CanIgnoreReturnValue
+    @Deprecated
+    public Builder setVideoChangeFrameRateStrategy(
+        @C.VideoChangeFrameRateStrategy int videoChangeFrameRateStrategy) {
+      wrappedBuilder.setVideoChangeFrameRateStrategy(videoChangeFrameRateStrategy);
+      return this;
+    }
+
+    /**
+     * @deprecated Use {@link ExoPlayer.Builder#setUseLazyPreparation(boolean)} instead.
+     */
+    @CanIgnoreReturnValue
+    @Deprecated
+    public Builder setUseLazyPreparation(boolean useLazyPreparation) {
+      wrappedBuilder.setUseLazyPreparation(useLazyPreparation);
+      return this;
+    }
+
+    /**
+     * @deprecated Use {@link ExoPlayer.Builder#setSeekParameters(SeekParameters)} instead.
+     */
+    @CanIgnoreReturnValue
+    @Deprecated
+    public Builder setSeekParameters(SeekParameters seekParameters) {
+      wrappedBuilder.setSeekParameters(seekParameters);
+      return this;
+    }
+
+    /**
+     * @deprecated Use {@link ExoPlayer.Builder#setSeekBackIncrementMs(long)} instead.
+     */
+    @CanIgnoreReturnValue
+    @Deprecated
+    public Builder setSeekBackIncrementMs(@IntRange(from = 1) long seekBackIncrementMs) {
+      wrappedBuilder.setSeekBackIncrementMs(seekBackIncrementMs);
+      return this;
+    }
+
+    /**
+     * @deprecated Use {@link ExoPlayer.Builder#setSeekForwardIncrementMs(long)} instead.
+     */
+    @CanIgnoreReturnValue
+    @Deprecated
+    public Builder setSeekForwardIncrementMs(@IntRange(from = 1) long seekForwardIncrementMs) {
+      wrappedBuilder.setSeekForwardIncrementMs(seekForwardIncrementMs);
+      return this;
+    }
+
+    /**
+     * @deprecated Use {@link ExoPlayer.Builder#setReleaseTimeoutMs(long)} instead.
+     */
+    @CanIgnoreReturnValue
+    @Deprecated
+    public Builder setReleaseTimeoutMs(long releaseTimeoutMs) {
+      wrappedBuilder.setReleaseTimeoutMs(releaseTimeoutMs);
+      return this;
+    }
+
+    /**
+     * @deprecated Use {@link ExoPlayer.Builder#setDetachSurfaceTimeoutMs(long)} instead.
+     */
+    @CanIgnoreReturnValue
+    @Deprecated
+    public Builder setDetachSurfaceTimeoutMs(long detachSurfaceTimeoutMs) {
+      wrappedBuilder.setDetachSurfaceTimeoutMs(detachSurfaceTimeoutMs);
+      return this;
+    }
+
+    /**
+     * @deprecated Use {@link ExoPlayer.Builder#setPauseAtEndOfMediaItems(boolean)} instead.
+     */
+    @CanIgnoreReturnValue
+    @Deprecated
+    public Builder setPauseAtEndOfMediaItems(boolean pauseAtEndOfMediaItems) {
+      wrappedBuilder.setPauseAtEndOfMediaItems(pauseAtEndOfMediaItems);
+      return this;
+    }
+
+    /**
+     * @deprecated Use {@link
+     *     ExoPlayer.Builder#setLivePlaybackSpeedControl(LivePlaybackSpeedControl)} instead.
+     */
+    @CanIgnoreReturnValue
+    @Deprecated
+    public Builder setLivePlaybackSpeedControl(LivePlaybackSpeedControl livePlaybackSpeedControl) {
+      wrappedBuilder.setLivePlaybackSpeedControl(livePlaybackSpeedControl);
+      return this;
+    }
+
+    /**
+     * @deprecated Use {@link ExoPlayer.Builder#setClock(Clock)} instead.
+     */
+    @CanIgnoreReturnValue
+    @Deprecated
+    @VisibleForTesting
+    public Builder setClock(Clock clock) {
+      wrappedBuilder.setClock(clock);
+      return this;
+    }
+
+    /**
+     * @deprecated Use {@link ExoPlayer.Builder#build()} instead.
+     */
+    @Deprecated
+    public SimpleExoPlayer build() {
+      return wrappedBuilder.buildSimpleExoPlayer();
+    }
+  }
+
+  private final ExoPlayerImpl player;
+  private final ConditionVariable constructorFinished;
+
+  /**
+   * @deprecated Use the {@link ExoPlayer.Builder}.
+   */
+  @Deprecated
+  protected SimpleExoPlayer(
+      Context context,
+      RenderersFactory renderersFactory,
+      TrackSelector trackSelector,
+      MediaSource.Factory mediaSourceFactory,
+      LoadControl loadControl,
+      BandwidthMeter bandwidthMeter,
+      AnalyticsCollector analyticsCollector,
+      boolean useLazyPreparation,
+      Clock clock,
+      Looper applicationLooper) {
+    this(
+        new ExoPlayer.Builder(
+                context,
+                renderersFactory,
+                mediaSourceFactory,
+                trackSelector,
+                loadControl,
+                bandwidthMeter,
+                analyticsCollector)
+            .setUseLazyPreparation(useLazyPreparation)
+            .setClock(clock)
+            .setLooper(applicationLooper));
   }
 
   /**
-   * Returns the video format currently being played, or null if no video is being played.
+   * @param builder The {@link Builder} to obtain all construction parameters.
    */
-  public Format getVideoFormat() {
-    return videoFormat;
+  protected SimpleExoPlayer(Builder builder) {
+    this(builder.wrappedBuilder);
   }
 
   /**
-   * Returns the audio format currently being played, or null if no audio is being played.
+   * @param builder The {@link ExoPlayer.Builder} to obtain all construction parameters.
    */
-  public Format getAudioFormat() {
-    return audioFormat;
+  /* package */ SimpleExoPlayer(ExoPlayer.Builder builder) {
+    constructorFinished = new ConditionVariable();
+    try {
+      player = new ExoPlayerImpl(builder, /* wrappingPlayer= */ this);
+    } finally {
+      constructorFinished.open();
+    }
+  }
+
+  @Override
+  public void experimentalSetOffloadSchedulingEnabled(boolean offloadSchedulingEnabled) {
+    blockUntilConstructorFinished();
+    player.experimentalSetOffloadSchedulingEnabled(offloadSchedulingEnabled);
+  }
+
+  @Override
+  public boolean experimentalIsSleepingForOffload() {
+    blockUntilConstructorFinished();
+    return player.experimentalIsSleepingForOffload();
   }
 
   /**
-   * Returns the audio session identifier, or {@link C#AUDIO_SESSION_ID_UNSET} if not set.
+   * @deprecated Use {@link ExoPlayer}, as the {@link AudioComponent} methods are defined by that
+   *     interface.
    */
+  @Deprecated
+  @Override
+  @Nullable
+  public AudioComponent getAudioComponent() {
+    return this;
+  }
+
+  /**
+   * @deprecated Use {@link ExoPlayer}, as the {@link VideoComponent} methods are defined by that
+   *     interface.
+   */
+  @Deprecated
+  @Override
+  @Nullable
+  public VideoComponent getVideoComponent() {
+    return this;
+  }
+
+  /**
+   * @deprecated Use {@link Player}, as the {@link TextComponent} methods are defined by that
+   *     interface.
+   */
+  @Deprecated
+  @Override
+  @Nullable
+  public TextComponent getTextComponent() {
+    return this;
+  }
+
+  /**
+   * @deprecated Use {@link Player}, as the {@link DeviceComponent} methods are defined by that
+   *     interface.
+   */
+  @Deprecated
+  @Override
+  @Nullable
+  public DeviceComponent getDeviceComponent() {
+    return this;
+  }
+
+  @Override
+  public void setVideoScalingMode(@C.VideoScalingMode int videoScalingMode) {
+    blockUntilConstructorFinished();
+    player.setVideoScalingMode(videoScalingMode);
+  }
+
+  @Override
+  public @C.VideoScalingMode int getVideoScalingMode() {
+    blockUntilConstructorFinished();
+    return player.getVideoScalingMode();
+  }
+
+  @Override
+  public void setVideoChangeFrameRateStrategy(
+      @C.VideoChangeFrameRateStrategy int videoChangeFrameRateStrategy) {
+    blockUntilConstructorFinished();
+    player.setVideoChangeFrameRateStrategy(videoChangeFrameRateStrategy);
+  }
+
+  @Override
+  public @C.VideoChangeFrameRateStrategy int getVideoChangeFrameRateStrategy() {
+    blockUntilConstructorFinished();
+    return player.getVideoChangeFrameRateStrategy();
+  }
+
+  @Override
+  public VideoSize getVideoSize() {
+    blockUntilConstructorFinished();
+    return player.getVideoSize();
+  }
+
+  @Override
+  public Size getSurfaceSize() {
+    blockUntilConstructorFinished();
+    return player.getSurfaceSize();
+  }
+
+  @Override
+  public void clearVideoSurface() {
+    blockUntilConstructorFinished();
+    player.clearVideoSurface();
+  }
+
+  @Override
+  public void clearVideoSurface(@Nullable Surface surface) {
+    blockUntilConstructorFinished();
+    player.clearVideoSurface(surface);
+  }
+
+  @Override
+  public void setVideoSurface(@Nullable Surface surface) {
+    blockUntilConstructorFinished();
+    player.setVideoSurface(surface);
+  }
+
+  @Override
+  public void setVideoSurfaceHolder(@Nullable SurfaceHolder surfaceHolder) {
+    blockUntilConstructorFinished();
+    player.setVideoSurfaceHolder(surfaceHolder);
+  }
+
+  @Override
+  public void clearVideoSurfaceHolder(@Nullable SurfaceHolder surfaceHolder) {
+    blockUntilConstructorFinished();
+    player.clearVideoSurfaceHolder(surfaceHolder);
+  }
+
+  @Override
+  public void setVideoSurfaceView(@Nullable SurfaceView surfaceView) {
+    blockUntilConstructorFinished();
+    player.setVideoSurfaceView(surfaceView);
+  }
+
+  @Override
+  public void clearVideoSurfaceView(@Nullable SurfaceView surfaceView) {
+    blockUntilConstructorFinished();
+    player.clearVideoSurfaceView(surfaceView);
+  }
+
+  @Override
+  public void setVideoTextureView(@Nullable TextureView textureView) {
+    blockUntilConstructorFinished();
+    player.setVideoTextureView(textureView);
+  }
+
+  @Override
+  public void clearVideoTextureView(@Nullable TextureView textureView) {
+    blockUntilConstructorFinished();
+    player.clearVideoTextureView(textureView);
+  }
+
+  @Override
+  public void addAudioOffloadListener(AudioOffloadListener listener) {
+    blockUntilConstructorFinished();
+    player.addAudioOffloadListener(listener);
+  }
+
+  @Override
+  public void removeAudioOffloadListener(AudioOffloadListener listener) {
+    blockUntilConstructorFinished();
+    player.removeAudioOffloadListener(listener);
+  }
+
+  @Override
+  public void setAudioAttributes(AudioAttributes audioAttributes, boolean handleAudioFocus) {
+    blockUntilConstructorFinished();
+    player.setAudioAttributes(audioAttributes, handleAudioFocus);
+  }
+
+  @Override
+  public AudioAttributes getAudioAttributes() {
+    blockUntilConstructorFinished();
+    return player.getAudioAttributes();
+  }
+
+  @Override
+  public void setAudioSessionId(int audioSessionId) {
+    blockUntilConstructorFinished();
+    player.setAudioSessionId(audioSessionId);
+  }
+
+  @Override
   public int getAudioSessionId() {
-    return audioSessionId;
+    blockUntilConstructorFinished();
+    return player.getAudioSessionId();
   }
 
-  /**
-   * Returns {@link DecoderCounters} for video, or null if no video is being played.
-   */
+  @Override
+  public void setAuxEffectInfo(AuxEffectInfo auxEffectInfo) {
+    blockUntilConstructorFinished();
+    player.setAuxEffectInfo(auxEffectInfo);
+  }
+
+  @Override
+  public void clearAuxEffectInfo() {
+    blockUntilConstructorFinished();
+    player.clearAuxEffectInfo();
+  }
+
+  @RequiresApi(23)
+  @Override
+  public void setPreferredAudioDevice(@Nullable AudioDeviceInfo audioDeviceInfo) {
+    blockUntilConstructorFinished();
+    player.setPreferredAudioDevice(audioDeviceInfo);
+  }
+
+  @Override
+  public void setVolume(float volume) {
+    blockUntilConstructorFinished();
+    player.setVolume(volume);
+  }
+
+  @Override
+  public float getVolume() {
+    blockUntilConstructorFinished();
+    return player.getVolume();
+  }
+
+  @Override
+  public boolean getSkipSilenceEnabled() {
+    blockUntilConstructorFinished();
+    return player.getSkipSilenceEnabled();
+  }
+
+  @Override
+  public void setVideoEffects(List<Effect> videoEffects) {
+    blockUntilConstructorFinished();
+    player.setVideoEffects(videoEffects);
+  }
+
+  @Override
+  public void setSkipSilenceEnabled(boolean skipSilenceEnabled) {
+    blockUntilConstructorFinished();
+    player.setSkipSilenceEnabled(skipSilenceEnabled);
+  }
+
+  @Override
+  public AnalyticsCollector getAnalyticsCollector() {
+    blockUntilConstructorFinished();
+    return player.getAnalyticsCollector();
+  }
+
+  @Override
+  public void addAnalyticsListener(AnalyticsListener listener) {
+    blockUntilConstructorFinished();
+    player.addAnalyticsListener(listener);
+  }
+
+  @Override
+  public void removeAnalyticsListener(AnalyticsListener listener) {
+    blockUntilConstructorFinished();
+    player.removeAnalyticsListener(listener);
+  }
+
+  @Override
+  public void setHandleAudioBecomingNoisy(boolean handleAudioBecomingNoisy) {
+    blockUntilConstructorFinished();
+    player.setHandleAudioBecomingNoisy(handleAudioBecomingNoisy);
+  }
+
+  @Override
+  public void setPriorityTaskManager(@Nullable PriorityTaskManager priorityTaskManager) {
+    blockUntilConstructorFinished();
+    player.setPriorityTaskManager(priorityTaskManager);
+  }
+
+  @Override
+  @Nullable
+  public Format getVideoFormat() {
+    blockUntilConstructorFinished();
+    return player.getVideoFormat();
+  }
+
+  @Override
+  @Nullable
+  public Format getAudioFormat() {
+    blockUntilConstructorFinished();
+    return player.getAudioFormat();
+  }
+
+  @Override
+  @Nullable
   public DecoderCounters getVideoDecoderCounters() {
-    return videoDecoderCounters;
+    blockUntilConstructorFinished();
+    return player.getVideoDecoderCounters();
   }
 
-  /**
-   * Returns {@link DecoderCounters} for audio, or null if no audio is being played.
-   */
+  @Override
+  @Nullable
   public DecoderCounters getAudioDecoderCounters() {
-    return audioDecoderCounters;
+    blockUntilConstructorFinished();
+    return player.getAudioDecoderCounters();
   }
 
-  /**
-   * Sets a listener to receive video events.
-   *
-   * @param listener The listener.
-   */
-  public void setVideoListener(VideoListener listener) {
-    videoListener = listener;
+  @Override
+  public void setVideoFrameMetadataListener(VideoFrameMetadataListener listener) {
+    blockUntilConstructorFinished();
+    player.setVideoFrameMetadataListener(listener);
   }
 
-  /**
-   * Clears the listener receiving video events if it matches the one passed. Else does nothing.
-   *
-   * @param listener The listener to clear.
-   */
-  public void clearVideoListener(VideoListener listener) {
-    if (videoListener == listener) {
-      videoListener = null;
-    }
+  @Override
+  public void clearVideoFrameMetadataListener(VideoFrameMetadataListener listener) {
+    blockUntilConstructorFinished();
+    player.clearVideoFrameMetadataListener(listener);
   }
 
-  /**
-   * Sets an output to receive text events.
-   *
-   * @param output The output.
-   */
-  public void setTextOutput(TextRenderer.Output output) {
-    textOutput = output;
+  @Override
+  public void setCameraMotionListener(CameraMotionListener listener) {
+    blockUntilConstructorFinished();
+    player.setCameraMotionListener(listener);
   }
 
-  /**
-   * Clears the output receiving text events if it matches the one passed. Else does nothing.
-   *
-   * @param output The output to clear.
-   */
-  public void clearTextOutput(TextRenderer.Output output) {
-    if (textOutput == output) {
-      textOutput = null;
-    }
+  @Override
+  public void clearCameraMotionListener(CameraMotionListener listener) {
+    blockUntilConstructorFinished();
+    player.clearCameraMotionListener(listener);
   }
 
-  /**
-   * Sets a listener to receive metadata events.
-   *
-   * @param output The output.
-   */
-  public void setMetadataOutput(MetadataRenderer.Output output) {
-    metadataOutput = output;
-  }
-
-  /**
-   * Clears the output receiving metadata events if it matches the one passed. Else does nothing.
-   *
-   * @param output The output to clear.
-   */
-  public void clearMetadataOutput(MetadataRenderer.Output output) {
-    if (metadataOutput == output) {
-      metadataOutput = null;
-    }
-  }
-
-  /**
-   * Sets a listener to receive debug events from the video renderer.
-   *
-   * @param listener The listener.
-   */
-  public void setVideoDebugListener(VideoRendererEventListener listener) {
-    videoDebugListener = listener;
-  }
-
-  /**
-   * Sets a listener to receive debug events from the audio renderer.
-   *
-   * @param listener The listener.
-   */
-  public void setAudioDebugListener(AudioRendererEventListener listener) {
-    audioDebugListener = listener;
+  @Override
+  public CueGroup getCurrentCues() {
+    blockUntilConstructorFinished();
+    return player.getCurrentCues();
   }
 
   // ExoPlayer implementation
 
   @Override
-  public void addListener(EventListener listener) {
+  public Looper getPlaybackLooper() {
+    blockUntilConstructorFinished();
+    return player.getPlaybackLooper();
+  }
+
+  @Override
+  public Looper getApplicationLooper() {
+    blockUntilConstructorFinished();
+    return player.getApplicationLooper();
+  }
+
+  @Override
+  public Clock getClock() {
+    blockUntilConstructorFinished();
+    return player.getClock();
+  }
+
+  @Override
+  public void addListener(Listener listener) {
+    blockUntilConstructorFinished();
     player.addListener(listener);
   }
 
   @Override
-  public void removeListener(EventListener listener) {
+  public void removeListener(Listener listener) {
+    blockUntilConstructorFinished();
     player.removeListener(listener);
   }
 
   @Override
-  public int getPlaybackState() {
+  public @State int getPlaybackState() {
+    blockUntilConstructorFinished();
     return player.getPlaybackState();
   }
 
   @Override
-  public void prepare(MediaSource mediaSource) {
-    player.prepare(mediaSource);
+  public @PlaybackSuppressionReason int getPlaybackSuppressionReason() {
+    blockUntilConstructorFinished();
+    return player.getPlaybackSuppressionReason();
   }
 
   @Override
+  @Nullable
+  public ExoPlaybackException getPlayerError() {
+    blockUntilConstructorFinished();
+    return player.getPlayerError();
+  }
+
+  @Override
+  public Commands getAvailableCommands() {
+    blockUntilConstructorFinished();
+    return player.getAvailableCommands();
+  }
+
+  @Override
+  public void prepare() {
+    blockUntilConstructorFinished();
+    player.prepare();
+  }
+
+  /**
+   * @deprecated Use {@link #setMediaSource(MediaSource)} and {@link ExoPlayer#prepare()} instead.
+   */
+  @Deprecated
+  @Override
+  @SuppressWarnings("deprecation") // Forwarding deprecated method.
+  public void prepare(MediaSource mediaSource) {
+    blockUntilConstructorFinished();
+    player.prepare(mediaSource);
+  }
+
+  /**
+   * @deprecated Use {@link #setMediaSource(MediaSource, boolean)} and {@link ExoPlayer#prepare()}
+   *     instead.
+   */
+  @Deprecated
+  @Override
+  @SuppressWarnings("deprecation") // Forwarding deprecated method.
   public void prepare(MediaSource mediaSource, boolean resetPosition, boolean resetState) {
+    blockUntilConstructorFinished();
     player.prepare(mediaSource, resetPosition, resetState);
   }
 
   @Override
+  public void setMediaItems(List<MediaItem> mediaItems, boolean resetPosition) {
+    blockUntilConstructorFinished();
+    player.setMediaItems(mediaItems, resetPosition);
+  }
+
+  @Override
+  public void setMediaItems(List<MediaItem> mediaItems, int startIndex, long startPositionMs) {
+    blockUntilConstructorFinished();
+    player.setMediaItems(mediaItems, startIndex, startPositionMs);
+  }
+
+  @Override
+  public void setMediaSources(List<MediaSource> mediaSources) {
+    blockUntilConstructorFinished();
+    player.setMediaSources(mediaSources);
+  }
+
+  @Override
+  public void setMediaSources(List<MediaSource> mediaSources, boolean resetPosition) {
+    blockUntilConstructorFinished();
+    player.setMediaSources(mediaSources, resetPosition);
+  }
+
+  @Override
+  public void setMediaSources(
+      List<MediaSource> mediaSources, int startMediaItemIndex, long startPositionMs) {
+    blockUntilConstructorFinished();
+    player.setMediaSources(mediaSources, startMediaItemIndex, startPositionMs);
+  }
+
+  @Override
+  public void setMediaSource(MediaSource mediaSource) {
+    blockUntilConstructorFinished();
+    player.setMediaSource(mediaSource);
+  }
+
+  @Override
+  public void setMediaSource(MediaSource mediaSource, boolean resetPosition) {
+    blockUntilConstructorFinished();
+    player.setMediaSource(mediaSource, resetPosition);
+  }
+
+  @Override
+  public void setMediaSource(MediaSource mediaSource, long startPositionMs) {
+    blockUntilConstructorFinished();
+    player.setMediaSource(mediaSource, startPositionMs);
+  }
+
+  @Override
+  public void addMediaItems(int index, List<MediaItem> mediaItems) {
+    blockUntilConstructorFinished();
+    player.addMediaItems(index, mediaItems);
+  }
+
+  @Override
+  public void addMediaSource(MediaSource mediaSource) {
+    blockUntilConstructorFinished();
+    player.addMediaSource(mediaSource);
+  }
+
+  @Override
+  public void addMediaSource(int index, MediaSource mediaSource) {
+    blockUntilConstructorFinished();
+    player.addMediaSource(index, mediaSource);
+  }
+
+  @Override
+  public void addMediaSources(List<MediaSource> mediaSources) {
+    blockUntilConstructorFinished();
+    player.addMediaSources(mediaSources);
+  }
+
+  @Override
+  public void addMediaSources(int index, List<MediaSource> mediaSources) {
+    blockUntilConstructorFinished();
+    player.addMediaSources(index, mediaSources);
+  }
+
+  @Override
+  public void moveMediaItems(int fromIndex, int toIndex, int newIndex) {
+    blockUntilConstructorFinished();
+    player.moveMediaItems(fromIndex, toIndex, newIndex);
+  }
+
+  @Override
+  public void replaceMediaItems(int fromIndex, int toIndex, List<MediaItem> mediaItems) {
+    blockUntilConstructorFinished();
+    player.replaceMediaItems(fromIndex, toIndex, mediaItems);
+  }
+
+  @Override
+  public void removeMediaItems(int fromIndex, int toIndex) {
+    blockUntilConstructorFinished();
+    player.removeMediaItems(fromIndex, toIndex);
+  }
+
+  @Override
+  public void setShuffleOrder(ShuffleOrder shuffleOrder) {
+    blockUntilConstructorFinished();
+    player.setShuffleOrder(shuffleOrder);
+  }
+
+  @Override
   public void setPlayWhenReady(boolean playWhenReady) {
+    blockUntilConstructorFinished();
     player.setPlayWhenReady(playWhenReady);
   }
 
   @Override
   public boolean getPlayWhenReady() {
+    blockUntilConstructorFinished();
     return player.getPlayWhenReady();
   }
 
   @Override
+  public void setPauseAtEndOfMediaItems(boolean pauseAtEndOfMediaItems) {
+    blockUntilConstructorFinished();
+    player.setPauseAtEndOfMediaItems(pauseAtEndOfMediaItems);
+  }
+
+  @Override
+  public boolean getPauseAtEndOfMediaItems() {
+    blockUntilConstructorFinished();
+    return player.getPauseAtEndOfMediaItems();
+  }
+
+  @Override
+  public @RepeatMode int getRepeatMode() {
+    blockUntilConstructorFinished();
+    return player.getRepeatMode();
+  }
+
+  @Override
+  public void setRepeatMode(@RepeatMode int repeatMode) {
+    blockUntilConstructorFinished();
+    player.setRepeatMode(repeatMode);
+  }
+
+  @Override
+  public void setShuffleModeEnabled(boolean shuffleModeEnabled) {
+    blockUntilConstructorFinished();
+    player.setShuffleModeEnabled(shuffleModeEnabled);
+  }
+
+  @Override
+  public boolean getShuffleModeEnabled() {
+    blockUntilConstructorFinished();
+    return player.getShuffleModeEnabled();
+  }
+
+  @Override
   public boolean isLoading() {
+    blockUntilConstructorFinished();
     return player.isLoading();
   }
 
+  @SuppressWarnings("ForOverride") // Forwarding to ForOverride method in ExoPlayerImpl.
   @Override
-  public void seekToDefaultPosition() {
-    player.seekToDefaultPosition();
+  @VisibleForTesting(otherwise = PROTECTED)
+  public void seekTo(
+      int mediaItemIndex,
+      long positionMs,
+      @Player.Command int seekCommand,
+      boolean isRepeatingCurrentItem) {
+    blockUntilConstructorFinished();
+    player.seekTo(mediaItemIndex, positionMs, seekCommand, isRepeatingCurrentItem);
   }
 
   @Override
-  public void seekToDefaultPosition(int windowIndex) {
-    player.seekToDefaultPosition(windowIndex);
+  public long getSeekBackIncrement() {
+    blockUntilConstructorFinished();
+    return player.getSeekBackIncrement();
   }
 
   @Override
-  public void seekTo(long positionMs) {
-    player.seekTo(positionMs);
+  public long getSeekForwardIncrement() {
+    blockUntilConstructorFinished();
+    return player.getSeekForwardIncrement();
   }
 
   @Override
-  public void seekTo(int windowIndex, long positionMs) {
-    player.seekTo(windowIndex, positionMs);
+  public long getMaxSeekToPreviousPosition() {
+    blockUntilConstructorFinished();
+    return player.getMaxSeekToPreviousPosition();
   }
 
   @Override
   public void setPlaybackParameters(PlaybackParameters playbackParameters) {
+    blockUntilConstructorFinished();
     player.setPlaybackParameters(playbackParameters);
   }
 
   @Override
   public PlaybackParameters getPlaybackParameters() {
+    blockUntilConstructorFinished();
     return player.getPlaybackParameters();
   }
 
   @Override
+  public void setSeekParameters(@Nullable SeekParameters seekParameters) {
+    blockUntilConstructorFinished();
+    player.setSeekParameters(seekParameters);
+  }
+
+  @Override
+  public SeekParameters getSeekParameters() {
+    blockUntilConstructorFinished();
+    return player.getSeekParameters();
+  }
+
+  @Override
+  public void setForegroundMode(boolean foregroundMode) {
+    blockUntilConstructorFinished();
+    player.setForegroundMode(foregroundMode);
+  }
+
+  @Override
   public void stop() {
+    blockUntilConstructorFinished();
     player.stop();
   }
 
   @Override
   public void release() {
+    blockUntilConstructorFinished();
     player.release();
-    removeSurfaceCallbacks();
-    if (surface != null) {
-      if (ownsSurface) {
-        surface.release();
-      }
-      surface = null;
-    }
   }
 
   @Override
-  public void sendMessages(ExoPlayerMessage... messages) {
-    player.sendMessages(messages);
-  }
-
-  @Override
-  public void blockingSendMessages(ExoPlayerMessage... messages) {
-    player.blockingSendMessages(messages);
+  public PlayerMessage createMessage(PlayerMessage.Target target) {
+    blockUntilConstructorFinished();
+    return player.createMessage(target);
   }
 
   @Override
   public int getRendererCount() {
+    blockUntilConstructorFinished();
     return player.getRendererCount();
   }
 
   @Override
-  public int getRendererType(int index) {
+  public @C.TrackType int getRendererType(int index) {
+    blockUntilConstructorFinished();
     return player.getRendererType(index);
   }
 
   @Override
-  public TrackGroupArray getCurrentTrackGroups() {
-    return player.getCurrentTrackGroups();
+  public Renderer getRenderer(int index) {
+    blockUntilConstructorFinished();
+    return player.getRenderer(index);
   }
 
   @Override
+  public TrackSelector getTrackSelector() {
+    blockUntilConstructorFinished();
+    return player.getTrackSelector();
+  }
+
+  /**
+   * @deprecated Use {@link #getCurrentTracks()}.
+   */
+  @Deprecated
+  @Override
+  public TrackGroupArray getCurrentTrackGroups() {
+    blockUntilConstructorFinished();
+    return player.getCurrentTrackGroups();
+  }
+
+  /**
+   * @deprecated Use {@link #getCurrentTracks()}.
+   */
+  @Deprecated
+  @Override
   public TrackSelectionArray getCurrentTrackSelections() {
+    blockUntilConstructorFinished();
     return player.getCurrentTrackSelections();
   }
 
   @Override
+  public Tracks getCurrentTracks() {
+    blockUntilConstructorFinished();
+    return player.getCurrentTracks();
+  }
+
+  @Override
+  public TrackSelectionParameters getTrackSelectionParameters() {
+    blockUntilConstructorFinished();
+    return player.getTrackSelectionParameters();
+  }
+
+  @Override
+  public void setTrackSelectionParameters(TrackSelectionParameters parameters) {
+    blockUntilConstructorFinished();
+    player.setTrackSelectionParameters(parameters);
+  }
+
+  @Override
+  public MediaMetadata getMediaMetadata() {
+    blockUntilConstructorFinished();
+    return player.getMediaMetadata();
+  }
+
+  @Override
+  public MediaMetadata getPlaylistMetadata() {
+    blockUntilConstructorFinished();
+    return player.getPlaylistMetadata();
+  }
+
+  @Override
+  public void setPlaylistMetadata(MediaMetadata mediaMetadata) {
+    blockUntilConstructorFinished();
+    player.setPlaylistMetadata(mediaMetadata);
+  }
+
+  @Override
   public Timeline getCurrentTimeline() {
+    blockUntilConstructorFinished();
     return player.getCurrentTimeline();
   }
 
   @Override
-  public Object getCurrentManifest() {
-    return player.getCurrentManifest();
-  }
-
-  @Override
   public int getCurrentPeriodIndex() {
+    blockUntilConstructorFinished();
     return player.getCurrentPeriodIndex();
   }
 
   @Override
-  public int getCurrentWindowIndex() {
-    return player.getCurrentWindowIndex();
+  public int getCurrentMediaItemIndex() {
+    blockUntilConstructorFinished();
+    return player.getCurrentMediaItemIndex();
   }
 
   @Override
   public long getDuration() {
+    blockUntilConstructorFinished();
     return player.getDuration();
   }
 
   @Override
   public long getCurrentPosition() {
+    blockUntilConstructorFinished();
     return player.getCurrentPosition();
   }
 
   @Override
   public long getBufferedPosition() {
+    blockUntilConstructorFinished();
     return player.getBufferedPosition();
   }
 
   @Override
-  public int getBufferedPercentage() {
-    return player.getBufferedPercentage();
+  public long getTotalBufferedDuration() {
+    blockUntilConstructorFinished();
+    return player.getTotalBufferedDuration();
   }
 
   @Override
-  public boolean isCurrentWindowDynamic() {
-    return player.isCurrentWindowDynamic();
+  public boolean isPlayingAd() {
+    blockUntilConstructorFinished();
+    return player.isPlayingAd();
   }
 
   @Override
-  public boolean isCurrentWindowSeekable() {
-    return player.isCurrentWindowSeekable();
+  public int getCurrentAdGroupIndex() {
+    blockUntilConstructorFinished();
+    return player.getCurrentAdGroupIndex();
   }
 
-  // Internal methods.
-
-  private void removeSurfaceCallbacks() {
-    if (textureView != null) {
-      if (textureView.getSurfaceTextureListener() != componentListener) {
-        Log.w(TAG, "SurfaceTextureListener already unset or replaced.");
-      } else {
-        textureView.setSurfaceTextureListener(null);
-      }
-      textureView = null;
-    }
-    if (surfaceHolder != null) {
-      surfaceHolder.removeCallback(componentListener);
-      surfaceHolder = null;
-    }
+  @Override
+  public int getCurrentAdIndexInAdGroup() {
+    blockUntilConstructorFinished();
+    return player.getCurrentAdIndexInAdGroup();
   }
 
-  private void setVideoSurfaceInternal(Surface surface, boolean ownsSurface) {
-    // Note: We don't turn this method into a no-op if the surface is being replaced with itself
-    // so as to ensure onRenderedFirstFrame callbacks are still called in this case.
-    ExoPlayerMessage[] messages = new ExoPlayerMessage[videoRendererCount];
-    int count = 0;
-    for (Renderer renderer : renderers) {
-      if (renderer.getTrackType() == C.TRACK_TYPE_VIDEO) {
-        messages[count++] = new ExoPlayerMessage(renderer, C.MSG_SET_SURFACE, surface);
-      }
-    }
-    if (this.surface != null && this.surface != surface) {
-      // If we created this surface, we are responsible for releasing it.
-      if (this.ownsSurface) {
-        this.surface.release();
-      }
-      // We're replacing a surface. Block to ensure that it's not accessed after the method returns.
-      player.blockingSendMessages(messages);
-    } else {
-      player.sendMessages(messages);
-    }
-    this.surface = surface;
-    this.ownsSurface = ownsSurface;
+  @Override
+  public long getContentPosition() {
+    blockUntilConstructorFinished();
+    return player.getContentPosition();
   }
 
-  private final class ComponentListener implements VideoRendererEventListener,
-      AudioRendererEventListener, TextRenderer.Output, MetadataRenderer.Output,
-      SurfaceHolder.Callback, TextureView.SurfaceTextureListener {
-
-    // VideoRendererEventListener implementation
-
-    @Override
-    public void onVideoEnabled(DecoderCounters counters) {
-      videoDecoderCounters = counters;
-      if (videoDebugListener != null) {
-        videoDebugListener.onVideoEnabled(counters);
-      }
-    }
-
-    @Override
-    public void onVideoDecoderInitialized(String decoderName, long initializedTimestampMs,
-        long initializationDurationMs) {
-      if (videoDebugListener != null) {
-        videoDebugListener.onVideoDecoderInitialized(decoderName, initializedTimestampMs,
-            initializationDurationMs);
-      }
-    }
-
-    @Override
-    public void onVideoInputFormatChanged(Format format) {
-      videoFormat = format;
-      if (videoDebugListener != null) {
-        videoDebugListener.onVideoInputFormatChanged(format);
-      }
-    }
-
-    @Override
-    public void onDroppedFrames(int count, long elapsed) {
-      if (videoDebugListener != null) {
-        videoDebugListener.onDroppedFrames(count, elapsed);
-      }
-    }
-
-    @Override
-    public void onVideoSizeChanged(int width, int height, int unappliedRotationDegrees,
-        float pixelWidthHeightRatio) {
-      if (videoListener != null) {
-        videoListener.onVideoSizeChanged(width, height, unappliedRotationDegrees,
-            pixelWidthHeightRatio);
-      }
-      if (videoDebugListener != null) {
-        videoDebugListener.onVideoSizeChanged(width, height, unappliedRotationDegrees,
-            pixelWidthHeightRatio);
-      }
-    }
-
-    @Override
-    public void onRenderedFirstFrame(Surface surface) {
-      if (videoListener != null && SimpleExoPlayer.this.surface == surface) {
-        videoListener.onRenderedFirstFrame();
-      }
-      if (videoDebugListener != null) {
-        videoDebugListener.onRenderedFirstFrame(surface);
-      }
-    }
-
-    @Override
-    public void onVideoDisabled(DecoderCounters counters) {
-      if (videoDebugListener != null) {
-        videoDebugListener.onVideoDisabled(counters);
-      }
-      videoFormat = null;
-      videoDecoderCounters = null;
-    }
-
-    // AudioRendererEventListener implementation
-
-    @Override
-    public void onAudioEnabled(DecoderCounters counters) {
-      audioDecoderCounters = counters;
-      if (audioDebugListener != null) {
-        audioDebugListener.onAudioEnabled(counters);
-      }
-    }
-
-    @Override
-    public void onAudioSessionId(int sessionId) {
-      audioSessionId = sessionId;
-      if (audioDebugListener != null) {
-        audioDebugListener.onAudioSessionId(sessionId);
-      }
-    }
-
-    @Override
-    public void onAudioDecoderInitialized(String decoderName, long initializedTimestampMs,
-        long initializationDurationMs) {
-      if (audioDebugListener != null) {
-        audioDebugListener.onAudioDecoderInitialized(decoderName, initializedTimestampMs,
-            initializationDurationMs);
-      }
-    }
-
-    @Override
-    public void onAudioInputFormatChanged(Format format) {
-      audioFormat = format;
-      if (audioDebugListener != null) {
-        audioDebugListener.onAudioInputFormatChanged(format);
-      }
-    }
-
-    @Override
-    public void onAudioTrackUnderrun(int bufferSize, long bufferSizeMs,
-        long elapsedSinceLastFeedMs) {
-      if (audioDebugListener != null) {
-        audioDebugListener.onAudioTrackUnderrun(bufferSize, bufferSizeMs, elapsedSinceLastFeedMs);
-      }
-    }
-
-    @Override
-    public void onAudioDisabled(DecoderCounters counters) {
-      if (audioDebugListener != null) {
-        audioDebugListener.onAudioDisabled(counters);
-      }
-      audioFormat = null;
-      audioDecoderCounters = null;
-      audioSessionId = C.AUDIO_SESSION_ID_UNSET;
-    }
-
-    // TextRenderer.Output implementation
-
-    @Override
-    public void onCues(List<Cue> cues) {
-      if (textOutput != null) {
-        textOutput.onCues(cues);
-      }
-    }
-
-    // MetadataRenderer.Output implementation
-
-    @Override
-    public void onMetadata(Metadata metadata) {
-      if (metadataOutput != null) {
-        metadataOutput.onMetadata(metadata);
-      }
-    }
-
-    // SurfaceHolder.Callback implementation
-
-    @Override
-    public void surfaceCreated(SurfaceHolder holder) {
-      setVideoSurfaceInternal(holder.getSurface(), false);
-    }
-
-    @Override
-    public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
-      // Do nothing.
-    }
-
-    @Override
-    public void surfaceDestroyed(SurfaceHolder holder) {
-      setVideoSurfaceInternal(null, false);
-    }
-
-    // TextureView.SurfaceTextureListener implementation
-
-    @Override
-    public void onSurfaceTextureAvailable(SurfaceTexture surfaceTexture, int width, int height) {
-      setVideoSurfaceInternal(new Surface(surfaceTexture), true);
-    }
-
-    @Override
-    public void onSurfaceTextureSizeChanged(SurfaceTexture surfaceTexture, int width, int height) {
-      // Do nothing.
-    }
-
-    @Override
-    public boolean onSurfaceTextureDestroyed(SurfaceTexture surfaceTexture) {
-      setVideoSurfaceInternal(null, true);
-      return true;
-    }
-
-    @Override
-    public void onSurfaceTextureUpdated(SurfaceTexture surfaceTexture) {
-      // Do nothing.
-    }
-
+  @Override
+  public long getContentBufferedPosition() {
+    blockUntilConstructorFinished();
+    return player.getContentBufferedPosition();
   }
 
+  @Override
+  public void setWakeMode(@C.WakeMode int wakeMode) {
+    blockUntilConstructorFinished();
+    player.setWakeMode(wakeMode);
+  }
+
+  @Override
+  public DeviceInfo getDeviceInfo() {
+    blockUntilConstructorFinished();
+    return player.getDeviceInfo();
+  }
+
+  @Override
+  public int getDeviceVolume() {
+    blockUntilConstructorFinished();
+    return player.getDeviceVolume();
+  }
+
+  @Override
+  public boolean isDeviceMuted() {
+    blockUntilConstructorFinished();
+    return player.isDeviceMuted();
+  }
+
+  /**
+   * @deprecated Use {@link #setDeviceVolume(int, int)} instead.
+   */
+  @Deprecated
+  @Override
+  public void setDeviceVolume(int volume) {
+    blockUntilConstructorFinished();
+    player.setDeviceVolume(volume);
+  }
+
+  @Override
+  public void setDeviceVolume(int volume, @C.VolumeFlags int flags) {
+    blockUntilConstructorFinished();
+    player.setDeviceVolume(volume, flags);
+  }
+
+  /**
+   * @deprecated Use {@link #increaseDeviceVolume(int)} instead.
+   */
+  @Deprecated
+  @Override
+  public void increaseDeviceVolume() {
+    blockUntilConstructorFinished();
+    player.increaseDeviceVolume();
+  }
+
+  @Override
+  public void increaseDeviceVolume(@C.VolumeFlags int flags) {
+    blockUntilConstructorFinished();
+    player.increaseDeviceVolume(flags);
+  }
+
+  /**
+   * @deprecated Use {@link #decreaseDeviceVolume(int)} instead.
+   */
+  @Deprecated
+  @Override
+  public void decreaseDeviceVolume() {
+    blockUntilConstructorFinished();
+    player.decreaseDeviceVolume();
+  }
+
+  @Override
+  public void decreaseDeviceVolume(@C.VolumeFlags int flags) {
+    blockUntilConstructorFinished();
+    player.decreaseDeviceVolume(flags);
+  }
+
+  /**
+   * @deprecated Use {@link #setDeviceMuted(boolean, int)} instead.
+   */
+  @Deprecated
+  @Override
+  public void setDeviceMuted(boolean muted) {
+    blockUntilConstructorFinished();
+    player.setDeviceMuted(muted);
+  }
+
+  @Override
+  public void setDeviceMuted(boolean muted, @C.VolumeFlags int flags) {
+    blockUntilConstructorFinished();
+    player.setDeviceMuted(muted, flags);
+  }
+
+  @Override
+  public boolean isTunnelingEnabled() {
+    blockUntilConstructorFinished();
+    return player.isTunnelingEnabled();
+  }
+
+  /* package */ void setThrowsWhenUsingWrongThread(boolean throwsWhenUsingWrongThread) {
+    blockUntilConstructorFinished();
+    player.setThrowsWhenUsingWrongThread(throwsWhenUsingWrongThread);
+  }
+
+  private void blockUntilConstructorFinished() {
+    // The constructor may be executed on a background thread. Wait with accessing the player from
+    // the app thread until the constructor finished executing.
+    constructorFinished.blockUninterruptible();
+  }
 }
